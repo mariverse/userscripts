@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         URL Cleaner
 // @namespace    local.url-cleaner
-// @version      1.0.1
+// @version      1.0.2
 // @license      MIT
 // @description  使用参数白名单清理网址；在 X/Twitter 页面点击前读取原始链接解析 t.co，并支持菜单净化输入网址。
 // @match        *://*/*
@@ -147,48 +147,103 @@
     }
 
     function getRealUrlFromText(anchor) {
-        const text = anchor && anchor.textContent ? anchor.textContent : '';
-        return normalizeDisplayedUrl(text);
+        if (!anchor) return null;
+        const direct = normalizeDisplayedUrl(anchor.textContent || '');
+        if (direct) return direct;
+        // X renders truncated URLs with the full tail inside a hidden span right
+        // before a trailing <span aria-hidden="true">…</span>:
+        //   <span aria-hidden="true">https://</span>visible<span aria-hidden="true">hidden-tail</span><span aria-hidden="true">…</span>
+        const nodes = anchor.childNodes ? [...anchor.childNodes] : [];
+        if (nodes.length >= 3) {
+            const last = nodes[nodes.length - 1];
+            const prev = nodes[nodes.length - 2];
+            if (
+                last && (last.textContent || '').trim() === '…' &&
+                prev && prev.nodeType === 1 && prev.getAttribute && prev.getAttribute('aria-hidden') === 'true' &&
+                (prev.textContent || '').trim().length > 0
+            ) {
+                const reconstructed = nodes.slice(0, -1).map((n) => n.textContent || '').join('');
+                return normalizeDisplayedUrl(reconstructed);
+            }
+        }
+        return null;
     }
 
-    function getEntityUrls(value, maxDepth = 5) {
-        const result = [];
+    function matchTcoUrl(candidateUrl, href) {
+        if (!candidateUrl || typeof candidateUrl !== 'string') return false;
+        const token = candidateUrl.replace(/^https?:\/\//i, '');
+        return href.includes(candidateUrl) || (token.startsWith('t.co/') && href.includes(token));
+    }
+
+    function extractRealUrlFromNode(root, href, maxDepth = 7) {
         const seen = new Set();
-        const stack = [{ value, depth: 0 }];
-        while (stack.length && result.length < 32) {
+        const stack = [{ value: root, depth: 0 }];
+        while (stack.length) {
             const current = stack.pop();
             const node = current.value;
             if (!node || typeof node !== 'object' || seen.has(node) || current.depth > maxDepth) continue;
             seen.add(node);
+
+            if (typeof node.expandedUrl === 'string' && (!node.url || matchTcoUrl(node.url, href))) {
+                return node.expandedUrl;
+            }
+            if (typeof node.expanded_url === 'string' && (!node.url || matchTcoUrl(node.url, href))) {
+                return node.expanded_url;
+            }
+            if (node.hoverLabel && typeof node.hoverLabel.label === 'string' && (!node.link || matchTcoUrl(node.link, href))) {
+                if (/^https?:\/\//i.test(node.hoverLabel.label)) return node.hoverLabel.label;
+            }
             const urls = node.entities && Array.isArray(node.entities.urls) ? node.entities.urls : null;
-            if (urls) result.push(...urls);
-            for (const key of ['tweet', 'legacy', 'data', 'props', 'memoizedProps', 'pendingProps']) {
-                if (node[key] && typeof node[key] === 'object') stack.push({ value: node[key], depth: current.depth + 1 });
+            if (urls) {
+                for (const item of urls) {
+                    if (item && item.expanded_url && item.url && matchTcoUrl(item.url, href)) {
+                        return item.expanded_url;
+                    }
+                }
+            }
+
+            if (Array.isArray(node)) {
+                for (let i = node.length - 1; i >= 0; i -= 1) {
+                    if (node[i] && typeof node[i] === 'object') {
+                        stack.push({ value: node[i], depth: current.depth + 1 });
+                    }
+                }
+                continue;
+            }
+
+            for (const key of [
+                'part', 'props', 'memoizedProps', 'pendingProps', 'passedProps', 'children',
+                'tweet', 'retweeted_status', 'retweeted_status_result', 'quoted_status', 'quoted_status_result',
+                'note_tweet', 'note_tweet_results', 'result', 'legacy', 'data', 'card', 'binding_values'
+            ]) {
+                if (node[key] && typeof node[key] === 'object') {
+                    stack.push({ value: node[key], depth: current.depth + 1 });
+                }
             }
         }
-        return result;
+        return null;
     }
 
     function getRealUrlFromFiber(anchor) {
-        const tweet = anchor.closest ? anchor.closest('[data-testid="tweet"]') : null;
-        if (!tweet) return null;
-        const rawTweet = tweet.wrappedJSObject || tweet;
-        const keys = Object.keys(rawTweet).filter((key) => key.startsWith('__reactFiber$') || key.startsWith('__reactProps$'));
-        if (!keys.length) return null;
-
         const href = anchor.href;
-        for (const key of keys) {
-            let fiber = rawTweet[key];
-            for (let depth = 0; depth < 50 && fiber; depth += 1) {
-                const sources = [fiber.memoizedProps, fiber.pendingProps, fiber.memoizedState, fiber].filter(Boolean);
-                for (const source of sources) {
-                    for (const item of getEntityUrls(source)) {
-                        if (!item || !item.expanded_url || !item.url) continue;
-                        const token = item.url.replace(/^https?:\/\//i, '');
-                        if (href.includes(item.url) || href.includes(token)) return item.expanded_url;
+        const elements = [
+            anchor,
+            anchor.closest ? anchor.closest('[data-testid="tweet"]') : null
+        ].filter(Boolean);
+
+        for (const el of elements) {
+            const rawEl = el.wrappedJSObject || el;
+            const keys = Object.keys(rawEl).filter((key) => key.startsWith('__reactFiber$') || key.startsWith('__reactProps$'));
+            for (const key of keys) {
+                let fiber = rawEl[key];
+                for (let depth = 0; depth < 50 && fiber; depth += 1) {
+                    const sources = [fiber.memoizedProps, fiber.pendingProps, fiber.memoizedState, fiber].filter(Boolean);
+                    for (const source of sources) {
+                        const found = extractRealUrlFromNode(source, href);
+                        if (found) return found;
                     }
+                    fiber = fiber.return;
                 }
-                fiber = fiber.return;
             }
         }
         return null;
@@ -450,8 +505,11 @@
     cleanCurrent();
     registerMenu();
     installXLinkResolver();
-    // Prepare the href before the browser handles Ctrl/Meta/Shift/middle/right
-    // clicks. This also covers context-menu "open in new tab" actions.
+    // Prepare the href on hover and before the browser handles Ctrl/Meta/Shift/middle/right
+    // clicks. This updates the bottom-left status bar URL preview and context-menu actions.
+    document.addEventListener('pointerover', (event) => {
+        prepareAnchor(anchorFrom(event));
+    }, true);
     document.addEventListener('pointerdown', (event) => {
         if (event.button !== 0 && event.button !== 1 && event.button !== 2) return;
         prepareAnchor(anchorFrom(event));
