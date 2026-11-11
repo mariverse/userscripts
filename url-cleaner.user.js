@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         URL Cleaner
-// @namespace    https://github.com/mariverse/userscripts/url-cleaner
+// @namespace    https://github.com/mariverse/userscripts
 // @version      1.0.3
 // @license      MIT
 // @description  使用参数白名单清理网址；在 X/Twitter 页面点击前读取原始链接解析 t.co，并支持菜单净化输入网址。
-// @author       GPT-6 Astra
+// @author       gemini-4-argon
 // @match        *://*/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
