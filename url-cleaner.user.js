@@ -1,12 +1,17 @@
 // ==UserScript==
-// @name         Clean Redirects & Tracking URLs
-// @namespace    https://example.invalid/clean-redirects
-// @version      0.1.0
-// @description  点击前解析 t.co 短链，并清理常见网址跟踪参数；支持直接打开和 SPA 导航。
-// @author       Codex
+// @name         URL Cleaner
+// @namespace    local.url-cleaner
+// @version      1.0.0
+// @license      MIT
+// @description  使用参数白名单清理网址；在 X/Twitter 页面点击前读取原始链接解析 t.co，并支持菜单净化输入网址。
 // @match        *://*/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
+// @grant        GM_registerMenuCommand
+// @grant        GM_setClipboard
+// @grant        GM.xmlHttpRequest
+// @grant        GM.registerMenuCommand
+// @grant        GM.setClipboard
 // @grant        unsafeWindow
 // @connect      *
 // @noframes
@@ -15,276 +20,433 @@
 (function () {
     'use strict';
 
-    const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-    const MAX_CACHE_SIZE = 128;
-    const redirectCache = new Map();
+    /* X link extraction adapted from psimaker/twitter-x-spy-link-remover.
+     * MIT License
+     * Copyright (c) psimaker
+     * Permission is hereby granted, free of charge, to any person obtaining a copy
+     * of this software and associated documentation files (the "Software"), to deal
+     * in the Software without restriction, including without limitation the rights
+     * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+     * copies of the Software, and to permit persons to whom the Software is
+     * furnished to do so, subject to the following conditions:
+     * The above copyright notice and this permission notice shall be included in all
+     * copies or substantial portions of the Software.
+     * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+     * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+     * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+     * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+     * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+     * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+     * SOFTWARE.
+     */
 
-    // Bilibili-Evolved 的“网址参数清理”组件使用的主要参数，加上常见分享参数。
-    const BILIBILI_PARAMS = new Set([
-        'spm_id_from', 'from_source', 'from_spmid', 'from', 'seid', 'share_source',
-        'share_medium', 'share_plat', 'share_tag', 'share_session_id', 'share_from',
-        'bbid', 'ts', 'timestamp', 'unique_k', 'rt', 'tdsourcetag', 'accept_quality',
-        'broadcast_type', 'current_qn', 'current_quality', 'playurl_h264',
-        'playurl_h265', 'quality_description', 'network', 'network_status',
-        'platform_network_status', 'p2p_type', 'referfrom', 'visit_id', 'bsource',
-        'spm', 'hotrank', '-arouter', 'vd_source', 'is_story_h5', 'buvid', 'plat_id',
-        'gofrom', 'jumplinktype', 'hasback', 'notitlebar', 'msource', 'live_from',
-        'extra_jump_from', 'subarea_rank', 'popular_rank', 'launch_id', 'spmid',
-        'trackid', 'from_avid', 'from_comid', 'share_token', 'share_id', 'share_code'
+    const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const cache = new Map();
+    const MAX_CACHE = 64;
+    const genericAllowed = new Set([
+        'q', 'query', 'search', 'keyword', 'keywords', 'id', 'sku', 'skuid', 'itemid',
+        'page', 'pageno', 'pagesize', 'offset', 'limit', 'start', 'count', 'sort', 'order',
+        'filter', 'filters', 'category', 'tag', 'lang', 'locale', 'hl', 'tab', 'type',
+        'view', 'mode', 'date', 'year', 'month', 'day', 'v', 't', 'list', 'index',
+        'width', 'height', 'format', 'size', 'quality', 'download', 'embed'
+    ]);
+    const googleAllowed = new Set([
+        'q', 'num', 'start', 'newwindow', 'tbm', 'tbs', 'udm', 'hl', 'gl', 'lr', 'cr',
+        'safe', 'nfpr', 'as_q', 'as_epq', 'as_oq', 'as_eq', 'as_sitesearch', 'as_filetype',
+        'filter', 'btnk'
+    ]);
+    const bingAllowed = new Set([
+        'q', 'count', 'first', 'filters', 'qft', 'mkt', 'setlang', 'cc', 'ensearch'
+    ]);
+    const bilibiliAllowed = new Set([
+        'p', 'page', 't', 'bvid', 'aid', 'cid', 'ep_id', 'season_id'
+    ]);
+    const zhihuAllowed = new Set([
+        'sort_by', 'order_by', 'page', 'page_size', 'limit', 'offset', 'include'
+    ]);
+    const taobaoAllowed = new Set([
+        'id', 'itemid', 'skuid', 'q', 'sort', 'page', 'pageno', 'pagesize', 'shopid',
+        'sellerid', 'category', 'tab'
+    ]);
+    const jdAllowed = new Set([
+        'sku', 'skuid', 'id', 'keyword', 'q', 'page', 'pageno', 'pagesize', 'sort',
+        'ev', 'stock', 'area', 'shopid', 'category', 'enc', 'wq', 'pid'
     ]);
 
-    const GOOGLE_PARAMS = new Set([
-        'ved', 'ei', 'oq', 'sourceid', 'gs_lcrp', 'sclient', 'iflsig', 'uule', 'gws_rd',
-        'sei', 'bih', 'biw', 'num', 'filter', 'client', 'nfpr'
-    ]);
+    // Signed download/API URLs can use arbitrary parameter names. Preserve them
+    // before applying the strict allowlist so cleaning never invalidates a URL.
+    const protectedQueryKey = /^(?:access_token|api[_-]?key|auth|authorization|code|expires?|expiry|key|nonce|policy|sig(?:nature)?|state|token|x-amz-|oauth[_-])/i;
 
-    const BING_PARAMS = new Set([
-        'cvid', 'form', 'pc', 'qs', 'sp', 'sk', 'ghsh', 'ghacc', 'ghpl', 'pq', 'sc',
-        'lq', 'filters', 'mscc', 'pq', 'sm', 'ensearch'
-    ]);
-
-    const ZHIHU_PARAMS = new Set([
-        'share_code', 'share_id', 'is_rec', 'is_share', 's_r', 's_t', 'share_source',
-        'utm_content', 'utm_medium', 'utm_source', 'utm_campaign'
-    ]);
-
-    const TAOBAO_PARAMS = new Set([
-        'ali_refid', 'ali_trackid', 'spm', 'scm', 'pvid', 'acm', 'utparam', 'xxc',
-        'mi_id', 'mm_sceneid', 'pricetid', 'loginbonus', 'union_lens', 'un_site',
-        'share_crt_v', 'shareurl', 'ut_sk', 'sourcetype', 'activity_id', 'from',
-        'scene', 'source', 'share_token', 'share_id', 'share_code'
-    ]);
-
-    const JD_PARAMS = new Set([
-        'cu', 'share_token', 'share_id', 'share_code', 'source', 'client', 'ad_od',
-        'wq', 'abt', 'ext', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term',
-        'utm_content', 'rid', 'pps', 'is_pop', 'babelChannel', 'log_id'
-    ]);
-
-    const COMMON_PARAMS = new Set([
-        'gclid', 'dclid', 'fbclid', 'msclkid', 'yclid', 'igshid', 's_kwcid', 'epik',
-        'mc_cid', 'mc_eid', 'vero_id', 'wickedid', 'oly_anon_id', 'ref_src', 'ref_url',
-        'referrer', 'referrer_id', 'campaign', 'campaign_id', 'affiliate', 'affiliate_id',
-        'aff_id', 'clickid', 'click_id', 'partner', 'tracking', 'tracking_id', 'trk',
-        'adid', 'ad_id', 'adset', 'adset_id', 'share_token', 'share_id', 'share_code',
-        'feature', 'si', '_ga', '_gl', '__s', '_hsenc', '_hsmi', 'hsctatracking'
-    ]);
-
-    function hostMatches(host, pattern) {
-        return host === pattern || host.endsWith(`.${pattern}`);
+    function hostIs(host, domain) {
+        return host === domain || host.endsWith('.' + domain);
     }
 
-    function isTrackingParam(name, host) {
-        const key = String(name).toLowerCase();
-        if (key.startsWith('utm_')) return true;
-        if (COMMON_PARAMS.has(key)) return true;
-
-        if (hostMatches(host, 'bilibili.com') || hostMatches(host, 'b23.tv')) {
-            if (BILIBILI_PARAMS.has(key)) return true;
-        }
-        if (host.includes('google.')) {
-            if (GOOGLE_PARAMS.has(key)) return true;
-        }
-        if (hostMatches(host, 'bing.com')) {
-            if (BING_PARAMS.has(key)) return true;
-        }
-        if (hostMatches(host, 'zhihu.com') || hostMatches(host, 'zhimg.com')) {
-            if (ZHIHU_PARAMS.has(key)) return true;
-        }
-        if (hostMatches(host, 'taobao.com') || hostMatches(host, 'tmall.com') || hostMatches(host, 'tb.cn')) {
-            if (TAOBAO_PARAMS.has(key)) return true;
-        }
-        if (hostMatches(host, 'jd.com') || hostMatches(host, '3.cn') || hostMatches(host, 'jd.hk')) {
-            if (JD_PARAMS.has(key)) return true;
-        }
-        return false;
+    function isProtectedUrl(url) {
+        const host = url.hostname.toLowerCase();
+        const path = url.pathname.toLowerCase();
+        if (/^(login|signin|sign-in|passport|auth|oauth|account|accounts|checkout|payment|pay|secure|captcha|verify)([.-]|$)/.test(host)) return true;
+        return /(^|\/)(login|signin|sign-in|logout|auth|oauth[^/]*|authorize[^/]*|checkout|payment|pay|captcha|verify|verification)(\/|$)/.test(path);
     }
 
-    function sanitizeUrl(input) {
-        let url;
+    function allowedParams(host) {
+        if (hostIs(host, 'bing.com')) return bingAllowed;
+        if (hostIs(host, 'google.com') || /^www\.google\.[a-z.]+$/.test(host)) return googleAllowed;
+        if (hostIs(host, 'bilibili.com') || hostIs(host, 'b23.tv')) return bilibiliAllowed;
+        if (hostIs(host, 'zhihu.com') || hostIs(host, 'zhimg.com')) return zhihuAllowed;
+        if (hostIs(host, 'taobao.com') || hostIs(host, 'tmall.com') || hostIs(host, 'tb.cn')) return taobaoAllowed;
+        if (hostIs(host, 'jd.com') || hostIs(host, 'jd.hk') || hostIs(host, '3.cn')) return jdAllowed;
+        return genericAllowed;
+    }
+
+    function clean(input) {
+        let u;
+        try { u = new URL(input, page.location.href); } catch (_) { return input; }
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return u.href;
+        if (isProtectedUrl(u)) return u.href;
+        if ([...u.searchParams.keys()].some((key) => protectedQueryKey.test(key))) return u.href;
+        const host = u.hostname.toLowerCase();
+        const allowed = allowedParams(host);
+        for (const key of [...new Set(u.searchParams.keys())]) {
+            if (!allowed.has(key.toLowerCase())) u.searchParams.delete(key);
+        }
+        return u.href;
+    }
+
+    function cleanCurrent() {
+        const before = page.location.href;
+        const after = clean(before);
+        if (after === before) return;
         try {
-            url = new URL(input, pageWindow.location.href);
+            page.history.replaceState(page.history.state, '', after);
         } catch (_) {
-            return input;
+            try { history.replaceState(history.state, '', after); } catch (_) { /* ignore */ }
         }
-
-        if (!/^https?:$/.test(url.protocol)) return url.toString();
-
-        const params = url.searchParams;
-        for (const key of [...new Set(params.keys())]) {
-            if (isTrackingParam(key, url.hostname.toLowerCase())) params.delete(key);
-        }
-        url.search = params.toString();
-        return url.toString();
     }
 
-    function isTcoUrl(input) {
+    function isTco(input) {
+        try { return new URL(input, page.location.href).hostname.toLowerCase() === 't.co'; } catch (_) { return false; }
+    }
+
+    function isXPage() {
+        const host = page.location.hostname.toLowerCase();
+        return host === 'x.com' || host.endsWith('.x.com') || host === 'twitter.com' || host.endsWith('.twitter.com');
+    }
+
+    function normalizeDisplayedUrl(value) {
+        const text = String(value || '').trim().replace(/\s+/g, '');
+        if (!text || /t\.co/i.test(text) || /[…]/.test(text)) return null;
+        const candidate = /^https?:\/\//i.test(text) ? text : 'https://' + text;
         try {
-            const url = new URL(input, pageWindow.location.href);
-            return url.protocol === 'http:' || url.protocol === 'https:'
-                ? url.hostname.toLowerCase() === 't.co'
-                : false;
+            const url = new URL(candidate);
+            if (!/^https?:$/.test(url.protocol) || !url.hostname.includes('.')) return null;
+            return url.href;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function getRealUrlFromText(anchor) {
+        const text = anchor && anchor.textContent ? anchor.textContent : '';
+        return normalizeDisplayedUrl(text);
+    }
+
+    function getEntityUrls(value, maxDepth = 5) {
+        const result = [];
+        const seen = new Set();
+        const stack = [{ value, depth: 0 }];
+        while (stack.length && result.length < 32) {
+            const current = stack.pop();
+            const node = current.value;
+            if (!node || typeof node !== 'object' || seen.has(node) || current.depth > maxDepth) continue;
+            seen.add(node);
+            const urls = node.entities && Array.isArray(node.entities.urls) ? node.entities.urls : null;
+            if (urls) result.push(...urls);
+            for (const key of ['tweet', 'legacy', 'data', 'props', 'memoizedProps', 'pendingProps']) {
+                if (node[key] && typeof node[key] === 'object') stack.push({ value: node[key], depth: current.depth + 1 });
+            }
+        }
+        return result;
+    }
+
+    function getRealUrlFromFiber(anchor) {
+        const tweet = anchor.closest ? anchor.closest('[data-testid="tweet"]') : null;
+        if (!tweet) return null;
+        const rawTweet = tweet.wrappedJSObject || tweet;
+        const keys = Object.keys(rawTweet).filter((key) => key.startsWith('__reactFiber$') || key.startsWith('__reactProps$'));
+        if (!keys.length) return null;
+
+        const href = anchor.href;
+        for (const key of keys) {
+            let fiber = rawTweet[key];
+            for (let depth = 0; depth < 50 && fiber; depth += 1) {
+                const sources = [fiber.memoizedProps, fiber.pendingProps, fiber.memoizedState, fiber].filter(Boolean);
+                for (const source of sources) {
+                    for (const item of getEntityUrls(source)) {
+                        if (!item || !item.expanded_url || !item.url) continue;
+                        const token = item.url.replace(/^https?:\/\//i, '');
+                        if (href.includes(item.url) || href.includes(token)) return item.expanded_url;
+                    }
+                }
+                fiber = fiber.return;
+            }
+        }
+        return null;
+    }
+
+    function getRealUrlFromX(anchor) {
+        // Prefer the complete URL from tweet data over potentially truncated text.
+        let candidate;
+        try { candidate = getRealUrlFromFiber(anchor) || getRealUrlFromText(anchor); }
+        catch (_) { return null; }
+        if (!candidate || /[…\s]/.test(candidate)) return null;
+        try {
+            const url = new URL(candidate);
+            return /^https?:$/.test(url.protocol) && !isTco(url.href) ? url.href : null;
+        } catch (_) { return null; }
+    }
+
+    function processXLink(anchor) {
+        if (!anchor || !anchor.href || !isTco(anchor.href)) return;
+        const real = getRealUrlFromX(anchor);
+        if (!real) return;
+        const cleanReal = clean(real);
+        if (anchor.dataset) anchor.dataset.cleanUrlOriginal = anchor.href;
+        anchor.href = cleanReal;
+    }
+
+    function scanXLinks(root) {
+        if (!isXPage() || !document.querySelectorAll) return;
+        const scope = root && root.nodeType ? root : (page.document || document);
+        if (scope.nodeType === 1 && scope.matches && scope.matches('a[href*="t.co"]')) processXLink(scope);
+        if (scope.querySelectorAll) scope.querySelectorAll('a[href*="t.co"]').forEach(processXLink);
+    }
+
+    function installXLinkResolver() {
+        if (!isXPage() || typeof MutationObserver === 'undefined') return;
+        let pending = false;
+        const roots = new Set();
+        const scan = () => {
+            if (pending) return;
+            pending = true;
+            const run = () => {
+                pending = false;
+                const queued = roots.size ? [...roots] : [page.document || document];
+                roots.clear();
+                queued.forEach(scanXLinks);
+            };
+            if (typeof page.requestAnimationFrame === 'function') page.requestAnimationFrame(run);
+            else page.setTimeout(run, 0);
+        };
+        const start = () => {
+            roots.add(page.document || document);
+            scan();
+            if (document.documentElement) {
+                const observer = new MutationObserver((records) => {
+                    for (const record of records) {
+                        if (record.type === 'attributes') roots.add(record.target);
+                        else for (const node of record.addedNodes) if (node.nodeType === 1) roots.add(node);
+                    }
+                    if (roots.size) scan();
+                });
+                observer.observe(document.documentElement, {
+                    childList: true, subtree: true, attributes: true, attributeFilter: ['href']
+                });
+            }
+        };
+        if (document.documentElement) start();
+        else document.addEventListener('DOMContentLoaded', start, { once: true });
+    }
+
+    function request(url, method) {
+        return new Promise((resolve, reject) => {
+            const fn = typeof GM_xmlhttpRequest === 'function'
+                ? GM_xmlhttpRequest
+                : (typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function' ? GM.xmlHttpRequest : null);
+            if (!fn) return reject(new Error('GM request API unavailable'));
+            fn({ method, url, redirect: 'follow', anonymous: true, timeout: 5000,
+                headers: { Accept: 'text/html,application/xhtml+xml' },
+                onload: resolve, onerror: reject, ontimeout: reject, onabort: reject });
+        });
+    }
+
+    function extractRedirectFromResponse(response, fallback) {
+        if (response && response.finalUrl && response.finalUrl !== fallback) return response.finalUrl;
+        if (response && response.responseURL && response.responseURL !== fallback) return response.responseURL;
+        const html = response && response.responseText;
+        if (!html) return fallback;
+        const patterns = [
+            /<meta[^>]+http-equiv=["']?refresh["']?[^>]+content=["'][^"']*url\s*=\s*([^"'>]+)[^"']*["']/i,
+            /<meta[^>]+content=["'][^"']*url\s*=\s*([^"'>]+)[^"']*[^>]+http-equiv=["']?refresh["']?/i,
+            /<meta[^>]+property=["']og:url["'][^>]+content=["']([^"']+)["']/i,
+            /(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']/i
+        ];
+        for (const pattern of patterns) {
+            const match = html.match(pattern);
+            if (!match || !match[1]) continue;
+            try { return new URL(match[1].trim(), fallback).href; } catch (_) { /* try next pattern */ }
+        }
+        return fallback;
+    }
+
+    async function resolveTco(input) {
+        const original = new URL(input, page.location.href).href;
+        if (!isTco(original)) return original;
+        const old = cache.get(original);
+        if (old) return old;
+        const pending = (async () => {
+            try {
+                const r = await request(original, 'HEAD');
+                const target = extractRedirectFromResponse(r, original);
+                if (target !== original) return target;
+            } catch (_) { /* fallback to GET */ }
+            try {
+                const r = await request(original, 'GET');
+                return extractRedirectFromResponse(r, original);
+            } catch (_) { return original; }
+        })();
+        if (cache.size >= MAX_CACHE) cache.delete(cache.keys().next().value);
+        cache.set(original, pending);
+        const result = await pending;
+        // A failed request returns the original t.co URL. Do not cache that
+        // failure forever; a later click can succeed after a transient outage.
+        if (result === original) cache.delete(original);
+        else cache.set(original, result);
+        return result;
+    }
+
+    async function copyText(text) {
+        const legacy = typeof GM_setClipboard === 'function' ? GM_setClipboard : null;
+        if (legacy) {
+            legacy(text, 'text');
+            return true;
+        }
+        if (typeof GM !== 'undefined' && typeof GM.setClipboard === 'function') {
+            await GM.setClipboard(text, 'text');
+            return true;
+        }
+        try {
+            await page.navigator.clipboard.writeText(text);
+            return true;
         } catch (_) {
             return false;
         }
     }
 
-    function remember(key, value) {
-        if (redirectCache.size >= MAX_CACHE_SIZE) {
-            const first = redirectCache.keys().next().value;
-            if (first) redirectCache.delete(first);
+    function promptForUrl(message, defaultValue) {
+        const promptFn = typeof page.prompt === 'function' ? page.prompt.bind(page) : null;
+        return promptFn ? promptFn(message, defaultValue) : null;
+    }
+
+    function showResult(text, copied) {
+        const message = copied
+            ? `净化后的网址已复制到剪贴板：\n\n${text}`
+            : `净化后的网址：\n\n${text}`;
+        if (typeof page.alert === 'function') page.alert(message);
+    }
+
+    function extractUrlFromInput(input) {
+        const text = String(input || '').trim();
+        const markdown = text.match(/\]\((https?:\/\/[^)\s]+)\)/i);
+        const match = markdown || text.match(/https?:\/\/[^\s<>"'`]+/i);
+        if (!match) return text;
+        const value = markdown ? markdown[1] : match[0];
+        return value.replace(/[.,;:!?\u3002\uFF0C\uFF1B\uFF1A\uFF01\uFF1F)\]}>]+$/g, '');
+    }
+
+    async function sanitizeUserInput() {
+        const input = promptForUrl('粘贴需要净化的网址：', '');
+        if (!input || !input.trim()) return;
+        let result = clean(extractUrlFromInput(input));
+        if (isTco(result)) result = clean(await resolveTco(result));
+        const copied = await copyText(result);
+        showResult(result, copied);
+    }
+
+    function registerMenu() {
+        const legacy = typeof GM_registerMenuCommand === 'function' ? GM_registerMenuCommand : null;
+        if (legacy) {
+            legacy('净化输入网址（复制结果）', sanitizeUserInput);
+            return;
         }
-        redirectCache.set(key, value);
+        if (typeof GM !== 'undefined' && typeof GM.registerMenuCommand === 'function') {
+            GM.registerMenuCommand('净化输入网址（复制结果）', sanitizeUserInput);
+        }
     }
 
-    function extractFinalUrl(response, fallback) {
-        const candidate = response && (response.finalUrl || response.responseURL);
-        return candidate || fallback;
+    function anchorFrom(event) {
+        const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+        for (const node of path) if (node && node.tagName === 'A' && node.href) return node;
+        const node = event.target;
+        return node && node.closest ? node.closest('a[href]') : null;
     }
 
-    function gmRequest(url, method) {
-        return new Promise((resolve, reject) => {
-            const request = typeof GM_xmlhttpRequest === 'function'
-                ? GM_xmlhttpRequest
-                : (typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function' ? GM.xmlHttpRequest : null);
-            if (!request) {
-                reject(new Error('Tampermonkey GM_xmlhttpRequest API is unavailable'));
+    function prepareAnchor(anchor) {
+        if (!anchor || !anchor.href) return;
+        const href = anchor.href;
+        if (isXPage() && isTco(href)) {
+            processXLink(anchor);
+            return;
+        }
+        if (!isTco(href) && href.includes('?')) {
+            const target = clean(href);
+            if (target !== href) anchor.href = target;
+        }
+    }
+
+    function onClick(event) {
+        if (event.defaultPrevented || event.button !== 0) return;
+        const a = anchorFrom(event);
+        if (!a) return;
+        prepareAnchor(a);
+        const href = a.href;
+        if (isXPage() && (isTco(href) || (a.dataset && a.dataset.cleanUrlOriginal))) {
+            const real = isTco(href) ? getRealUrlFromX(a) : href;
+            if (real) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                const target = clean(real);
+                if (a.target === '_blank' || event.ctrlKey || event.metaKey || event.shiftKey) {
+                    page.open(target, '_blank', 'noopener,noreferrer');
+                } else {
+                    page.location.assign(target);
+                }
                 return;
             }
-            request({
-                method,
-                url,
-                redirect: 'follow',
-                anonymous: true,
-                timeout: 5000,
-                headers: { Accept: 'text/html,application/xhtml+xml' },
-                onload: resolve,
-                onerror: reject,
-                ontimeout: reject,
-                onabort: reject
-            });
-        });
-    }
-
-    async function resolveShortUrl(input) {
-        const original = new URL(input, pageWindow.location.href).toString();
-        if (!isTcoUrl(original)) return original;
-        if (redirectCache.has(original)) return redirectCache.get(original);
-
-        const pending = (async () => {
-            try {
-                const head = await gmRequest(original, 'HEAD');
-                const headUrl = extractFinalUrl(head, original);
-                if (headUrl && headUrl !== original) return headUrl;
-            } catch (_) {
-                // Some short-link servers reject HEAD; use GET below.
-            }
-            try {
-                const get = await gmRequest(original, 'GET');
-                return extractFinalUrl(get, original);
-            } catch (_) {
-                return original;
-            }
-        })();
-
-        remember(original, pending);
-        const result = await pending;
-        remember(original, result);
-        return result;
-    }
-
-    function navigateClean(url, anchor) {
-        const clean = sanitizeUrl(url);
-        const target = anchor && anchor.target;
-        if (target && target !== '_self' && target !== '_top' && target !== '_parent') {
-            pageWindow.open(clean, target, 'noopener');
-        } else {
-            pageWindow.location.assign(clean);
         }
-    }
-
-    function findAnchor(event) {
-        const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
-        for (const item of path) {
-            if (item && item.nodeType === 1 && item.tagName === 'A' && item.href) return item;
-        }
-        const target = event.target;
-        return target && target.closest ? target.closest('a[href]') : null;
-    }
-
-    function handleClick(event) {
-        if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-        const anchor = findAnchor(event);
-        if (!anchor) return;
-
-        let href;
-        try {
-            href = new URL(anchor.href, pageWindow.location.href).toString();
-        } catch (_) {
-            return;
-        }
-
-        if (isTcoUrl(href)) {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        if (isTco(href)) {
             event.preventDefault();
             event.stopImmediatePropagation();
-            resolveShortUrl(href).then((resolved) => navigateClean(resolved, anchor));
-            return;
-        }
-
-        const clean = sanitizeUrl(href);
-        if (clean !== href) anchor.href = clean;
+            resolveTco(href).then((target) => page.location.assign(clean(target)));
+        } else prepareAnchor(a);
     }
 
-    function warmShortUrlCache(event) {
-        const anchor = findAnchor(event);
-        if (!anchor || !isTcoUrl(anchor.href)) return;
-        void resolveShortUrl(anchor.href);
-    }
+    cleanCurrent();
+    registerMenu();
+    installXLinkResolver();
+    // Prepare the href before the browser handles Ctrl/Meta/Shift/middle/right
+    // clicks. This also covers context-menu "open in new tab" actions.
+    document.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0 && event.button !== 1 && event.button !== 2) return;
+        prepareAnchor(anchorFrom(event));
+    }, true);
+    document.addEventListener('click', onClick, true);
+    page.addEventListener('popstate', cleanCurrent, true);
+    page.addEventListener('hashchange', cleanCurrent, true);
 
-    function cleanCurrentUrl() {
-        const current = pageWindow.location.href;
-        const clean = sanitizeUrl(current);
-        if (clean !== current) {
-            try {
-                pageWindow.history.replaceState(pageWindow.history.state, '', clean);
-            } catch (_) {
-                // A page can reject replaceState for an unusual URL; navigation handling still works.
-            }
-        }
-    }
-
-    function patchHistory() {
-        for (const method of ['pushState', 'replaceState']) {
-            const original = pageWindow.history[method];
-            if (typeof original !== 'function') continue;
-            pageWindow.history[method] = function (state, title, url) {
-                let nextUrl = url;
-                if (url != null) {
-                    try {
-                        nextUrl = sanitizeUrl(new URL(url, pageWindow.location.href).toString());
-                    } catch (_) {
-                        nextUrl = url;
-                    }
-                }
-                return original.call(this, state, title, nextUrl);
+    for (const method of ['pushState', 'replaceState']) {
+        try {
+            const original = page.history[method];
+            page.history[method] = function (state, title, url) {
+                const next = url == null ? url : clean(new URL(url, page.location.href).href);
+                return original.call(this, state, title, next);
             };
-        }
+        } catch (_) { /* ignore */ }
     }
 
-    // t.co 直接打开时，在页面内容加载前解析并替换到真实地址。
-    if (isTcoUrl(pageWindow.location.href)) {
-        resolveShortUrl(pageWindow.location.href).then((resolved) => {
-            if (resolved !== pageWindow.location.href) {
-                pageWindow.location.replace(sanitizeUrl(resolved));
-            }
+    if (isTco(page.location.href)) {
+        resolveTco(page.location.href).then((target) => {
+            if (target !== page.location.href) page.location.replace(clean(target));
         });
-    } else {
-        cleanCurrentUrl();
     }
-
-    patchHistory();
-    document.addEventListener('click', handleClick, true);
-    document.addEventListener('pointerover', warmShortUrlCache, true);
-    pageWindow.addEventListener('popstate', cleanCurrentUrl, true);
-    pageWindow.addEventListener('hashchange', cleanCurrentUrl, true);
 })();
