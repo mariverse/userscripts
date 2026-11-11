@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         URL Cleaner
 // @namespace    local.url-cleaner
-// @version      1.0.0
+// @version      1.0.1
 // @license      MIT
 // @description  使用参数白名单清理网址；在 X/Twitter 页面点击前读取原始链接解析 t.co，并支持菜单净化输入网址。
 // @match        *://*/*
@@ -13,6 +13,7 @@
 // @grant        GM.registerMenuCommand
 // @grant        GM.setClipboard
 // @grant        unsafeWindow
+// @connect      t.co
 // @connect      *
 // @noframes
 // ==/UserScript==
@@ -257,15 +258,42 @@
         else document.addEventListener('DOMContentLoaded', start, { once: true });
     }
 
-    function request(url, method) {
+    function request(url, method, timeoutMs = 2500) {
         return new Promise((resolve, reject) => {
             const fn = typeof GM_xmlhttpRequest === 'function'
                 ? GM_xmlhttpRequest
                 : (typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function' ? GM.xmlHttpRequest : null);
             if (!fn) return reject(new Error('GM request API unavailable'));
-            fn({ method, url, redirect: 'follow', anonymous: true, timeout: 5000,
-                headers: { Accept: 'text/html,application/xhtml+xml' },
-                onload: resolve, onerror: reject, ontimeout: reject, onabort: reject });
+            let settled = false;
+            const finish = (cb) => (val) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                cb(val);
+            };
+            let req;
+            const timer = setTimeout(() => {
+                if (settled) return;
+                settled = true;
+                try { if (req && typeof req.abort === 'function') req.abort(); } catch (_) { /* ignore */ }
+                reject(new Error('GM request timeout'));
+            }, timeoutMs);
+            try {
+                req = fn({
+                    method,
+                    url,
+                    redirect: 'follow',
+                    anonymous: true,
+                    timeout: timeoutMs,
+                    headers: { Accept: 'text/html,application/xhtml+xml' },
+                    onload: finish(resolve),
+                    onerror: finish(reject),
+                    ontimeout: finish(reject),
+                    onabort: finish(reject)
+                });
+            } catch (err) {
+                finish(reject)(err);
+            }
         });
     }
 
@@ -277,13 +305,16 @@
         const patterns = [
             /<meta[^>]+http-equiv=["']?refresh["']?[^>]+content=["'][^"']*url\s*=\s*([^"'>]+)[^"']*["']/i,
             /<meta[^>]+content=["'][^"']*url\s*=\s*([^"'>]+)[^"']*[^>]+http-equiv=["']?refresh["']?/i,
+            /(?:window\.)?location\.replace\(\s*["']([^"']+)["']\s*\)/i,
             /<meta[^>]+property=["']og:url["'][^>]+content=["']([^"']+)["']/i,
-            /(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']/i
+            /(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']/i,
+            /<title>\s*(https?:\/\/[^<\s]+)\s*<\/title>/i
         ];
         for (const pattern of patterns) {
             const match = html.match(pattern);
             if (!match || !match[1]) continue;
-            try { return new URL(match[1].trim(), fallback).href; } catch (_) { /* try next pattern */ }
+            const raw = match[1].trim().replace(/\\\//g, '/');
+            try { return new URL(raw, fallback).href; } catch (_) { /* try next pattern */ }
         }
         return fallback;
     }
@@ -294,11 +325,6 @@
         const old = cache.get(original);
         if (old) return old;
         const pending = (async () => {
-            try {
-                const r = await request(original, 'HEAD');
-                const target = extractRedirectFromResponse(r, original);
-                if (target !== original) return target;
-            } catch (_) { /* fallback to GET */ }
             try {
                 const r = await request(original, 'GET');
                 return extractRedirectFromResponse(r, original);
