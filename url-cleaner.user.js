@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         URL Cleaner
 // @namespace    https://github.com/mariverse/userscripts
-// @version      1.0.3
+// @version      1.0.4
 // @license      MIT
 // @description  使用参数白名单清理网址；在 X/Twitter 页面点击前读取原始链接解析 t.co，并支持菜单净化输入网址。
 // @author       gemini-4-argon
@@ -76,8 +76,9 @@
     ]);
 
     // Signed download/API URLs can use arbitrary parameter names. Preserve them
-    // before applying the strict allowlist so cleaning never invalidates a URL.
-    const protectedQueryKey = /^(?:access_token|api[_-]?key|auth|authorization|code|expires?|expiry|key|nonce|policy|sig(?:nature)?|state|token|x-amz-|oauth[_-])/i;
+    // before applying the allowlist. Match parameter names or delimited variants
+    // so ordinary search parameters such as keyword do not bypass cleaning.
+    const protectedQueryKey = /^(?:(?:access_token|api[_-]?key|auth|authorization|code|expires?|expiry|key|nonce|policy|sig(?:nature)?|state|token)(?:$|[_-])|x-amz-|oauth[_-])/i;
 
     function hostIs(host, domain) {
         return host === domain || host.endsWith('.' + domain);
