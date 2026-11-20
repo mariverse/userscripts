@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         URL Cleaner
 // @namespace    https://github.com/mariverse/userscripts
-// @version      1.0.4
+// @version      1.0.5
 // @license      MIT
-// @description  使用参数白名单清理网址；在 X/Twitter 页面点击前读取原始链接解析 t.co，并支持菜单净化输入网址。
-// @author       gemini-4-argon
+// @description  清理已知跟踪参数，在指定页面应用参数白名单，并在 X/Twitter 点击前解析 t.co。
+// @author       gpt-6.2-sol
 // @match        *://*/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
@@ -45,32 +45,27 @@
     const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
     const cache = new Map();
     const MAX_CACHE = 64;
-    const genericAllowed = new Set([
-        'q', 'query', 'search', 'keyword', 'keywords', 'id', 'sku', 'skuid', 'itemid',
-        'page', 'pageno', 'pagesize', 'offset', 'limit', 'start', 'count', 'sort', 'order',
-        'filter', 'filters', 'category', 'tag', 'lang', 'locale', 'hl', 'tab', 'type',
-        'view', 'mode', 'date', 'year', 'month', 'day', 'v', 't', 'list', 'index',
-        'width', 'height', 'format', 'size', 'quality', 'download', 'embed'
+    const trackingParams = new Set([
+        'gclid', 'dclid', 'gbraid', 'wbraid', 'msclkid', 'fbclid', 'ttclid', 'twclid',
+        'igshid', 'mc_cid', 'mc_eid', '_ga', '_gl'
     ]);
-    const googleAllowed = new Set([
-        'q', 'num', 'start', 'newwindow', 'tbm', 'tbs', 'udm', 'hl', 'gl', 'lr', 'cr',
-        'safe', 'nfpr', 'as_q', 'as_epq', 'as_oq', 'as_eq', 'as_sitesearch', 'as_filetype',
-        'filter', 'btnk'
+    const bilibiliTracking = new Set([
+        'spm_id_from', 'vd_source', 'share_source', 'share_medium', 'share_plat',
+        'share_session_id', 'share_tag', 'unique_k'
     ]);
-    const bingAllowed = new Set([
-        'q', 'count', 'first', 'filters', 'qft', 'mkt', 'setlang', 'cc', 'ensearch'
+    const googleSearchTracking = new Set([
+        'sxsrf', 'ei', 'ved', 'usg', 'oq', 'gs_lcrp', 'gs_lcp', 'sca_esv', 'source',
+        'sourceid', 'iflsig', 'uact', 'ictx', 'opi', 'biw', 'bih'
     ]);
-    const bilibiliAllowed = new Set([
-        'p', 'page', 't', 'bvid', 'aid', 'cid', 'ep_id', 'season_id'
+    const bingSearchTracking = new Set([
+        'form', 'sp', 'lq', 'pq', 'sc', 'qs', 'sk', 'cvid', 'ocid', 'ghsh', 'ghacc', 'ghpl'
     ]);
-    const zhihuAllowed = new Set([
-        'sort_by', 'order_by', 'page', 'page_size', 'limit', 'offset', 'include'
-    ]);
-    const taobaoAllowed = new Set([
+    const jdSearchTracking = new Set(['pvid', 'themecolor', 'from', 'spmtag', 'spm']);
+    const taobaoItemAllowed = new Set([
         'id', 'itemid', 'skuid', 'q', 'sort', 'page', 'pageno', 'pagesize', 'shopid',
         'sellerid', 'category', 'tab'
     ]);
-    const jdAllowed = new Set([
+    const jdItemAllowed = new Set([
         'sku', 'skuid', 'id', 'keyword', 'q', 'page', 'pageno', 'pagesize', 'sort',
         'ev', 'stock', 'area', 'shopid', 'category', 'enc', 'wq', 'pid'
     ]);
@@ -91,28 +86,44 @@
         return /(^|\/)(login|signin|sign-in|logout|auth|oauth[^/]*|authorize[^/]*|checkout|payment|pay|captcha|verify|verification)(\/|$)/.test(path);
     }
 
-    function allowedParams(host) {
-        if (hostIs(host, 'bing.com')) return bingAllowed;
-        if (hostIs(host, 'google.com') || /^www\.google\.[a-z.]+$/.test(host)) return googleAllowed;
-        if (hostIs(host, 'bilibili.com') || hostIs(host, 'b23.tv')) return bilibiliAllowed;
-        if (hostIs(host, 'zhihu.com') || hostIs(host, 'zhimg.com')) return zhihuAllowed;
-        if (hostIs(host, 'taobao.com') || hostIs(host, 'tmall.com') || hostIs(host, 'tb.cn')) return taobaoAllowed;
-        if (hostIs(host, 'jd.com') || hostIs(host, 'jd.hk') || hostIs(host, '3.cn')) return jdAllowed;
-        return genericAllowed;
+    function allowedParams(host, path) {
+        if (path === '/item.htm' && (host === 'item.taobao.com' || host === 'detail.tmall.com')) return taobaoItemAllowed;
+        if (host === 'item.jd.com' && /^\/\d+\.html$/.test(path)) return jdItemAllowed;
+        return null;
+    }
+
+    function siteTrackingParams(host, path) {
+        if (hostIs(host, 'bilibili.com')) return bilibiliTracking;
+        if (path !== '/search') return null;
+        if (host === 'search.jd.com') return jdSearchTracking;
+        if (hostIs(host, 'bing.com')) return bingSearchTracking;
+        if (hostIs(host, 'google.com') || /^www\.google\.[a-z]{2}(?:\.[a-z]{2})?$/.test(host)) return googleSearchTracking;
+        return null;
     }
 
     function clean(input) {
-        let u;
-        try { u = new URL(input, page.location.href); } catch (_) { return input; }
-        if (u.protocol !== 'http:' && u.protocol !== 'https:') return u.href;
-        if (isProtectedUrl(u)) return u.href;
-        if ([...u.searchParams.keys()].some((key) => protectedQueryKey.test(key))) return u.href;
-        const host = u.hostname.toLowerCase();
-        const allowed = allowedParams(host);
-        for (const key of [...new Set(u.searchParams.keys())]) {
-            if (!allowed.has(key.toLowerCase())) u.searchParams.delete(key);
+        let url;
+        try { url = new URL(input, page.location.href); } catch (_) { return input; }
+        if (!url.search || (url.protocol !== 'http:' && url.protocol !== 'https:') || isProtectedUrl(url)) return url.href;
+        const host = url.hostname.toLowerCase();
+        const path = url.pathname.toLowerCase();
+        const allowed = allowedParams(host, path);
+        const siteTracking = siteTrackingParams(host, path);
+        const fields = url.search.slice(1).split('&');
+        const kept = [];
+        for (const field of fields) {
+            const separator = field.indexOf('=');
+            const rawKey = separator < 0 ? field : field.slice(0, separator);
+            let key;
+            try { key = decodeURIComponent(rawKey.replace(/\+/g, ' ')).toLowerCase(); }
+            catch (_) { kept.push(field); continue; }
+            if (protectedQueryKey.test(key)) return url.href;
+            if (key.startsWith('utm_') || trackingParams.has(key) || siteTracking?.has(key)) continue;
+            if (allowed && !allowed.has(key)) continue;
+            kept.push(field);
         }
-        return u.href;
+        if (kept.length !== fields.length) url.search = kept.join('&');
+        return url.href;
     }
 
     function cleanCurrent() {
