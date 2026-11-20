@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         URL Cleaner
 // @namespace    https://github.com/mariverse/userscripts
-// @version      1.0.6
+// @version      1.0.7
 // @license      MIT
 // @description  清理已知跟踪参数，在指定页面应用参数白名单，并在 X/Twitter 点击前解析 t.co。
 // @author       gpt-6.2-sol
@@ -72,6 +72,10 @@
         {
             matches: (host, path) => host === 'search.jd.com' && path === '/search',
             remove: new Set(['pvid', 'themecolor', 'from', 'spmtag', 'spm'])
+        },
+        {
+            matches: (host, path) => host === 's.taobao.com' && path === '/search',
+            remove: new Set(['clientpreloadid', 'initiative_id', 'preloadorigin', 'sourceid', 'spm', 'ssid'])
         },
         {
             matches: (host, path) => path === '/item.htm' && (host === 'item.taobao.com' || host === 'detail.tmall.com'),
