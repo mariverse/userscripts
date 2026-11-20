@@ -49,26 +49,45 @@
         'gclid', 'dclid', 'gbraid', 'wbraid', 'msclkid', 'fbclid', 'ttclid', 'twclid',
         'igshid', 'mc_cid', 'mc_eid', '_ga', '_gl'
     ]);
-    const bilibiliTracking = new Set([
-        'spm_id_from', 'vd_source', 'share_source', 'share_medium', 'share_plat',
-        'share_session_id', 'share_tag', 'unique_k'
-    ]);
-    const googleSearchTracking = new Set([
-        'sxsrf', 'ei', 'ved', 'usg', 'oq', 'gs_lcrp', 'gs_lcp', 'sca_esv', 'source',
-        'sourceid', 'iflsig', 'uact', 'ictx', 'opi', 'biw', 'bih'
-    ]);
-    const bingSearchTracking = new Set([
-        'form', 'sp', 'lq', 'pq', 'sc', 'qs', 'sk', 'cvid', 'ocid', 'ghsh', 'ghacc', 'ghpl'
-    ]);
-    const jdSearchTracking = new Set(['pvid', 'themecolor', 'from', 'spmtag', 'spm']);
-    const taobaoItemAllowed = new Set([
-        'id', 'itemid', 'skuid', 'q', 'sort', 'page', 'pageno', 'pagesize', 'shopid',
-        'sellerid', 'category', 'tab'
-    ]);
-    const jdItemAllowed = new Set([
-        'sku', 'skuid', 'id', 'keyword', 'q', 'page', 'pageno', 'pagesize', 'sort',
-        'ev', 'stock', 'area', 'shopid', 'category', 'enc', 'wq', 'pid'
-    ]);
+    const siteParamRules = [
+        {
+            matches: (host, path) => path === '/search' && hostIs(host, 'bing.com'),
+            remove: new Set(['form', 'sp', 'lq', 'pq', 'sc', 'qs', 'sk', 'cvid', 'ocid', 'ghsh', 'ghacc', 'ghpl'])
+        },
+        {
+            matches: (host, path) => path === '/search' &&
+                (hostIs(host, 'google.com') || /^www\.google\.[a-z]{2}(?:\.[a-z]{2})?$/.test(host)),
+            remove: new Set([
+                'sxsrf', 'ei', 'ved', 'usg', 'oq', 'gs_lcrp', 'gs_lcp', 'sca_esv', 'source',
+                'sourceid', 'iflsig', 'uact', 'ictx', 'opi', 'biw', 'bih'
+            ])
+        },
+        {
+            matches: (host) => hostIs(host, 'bilibili.com'),
+            remove: new Set([
+                'spm_id_from', 'vd_source', 'share_source', 'share_medium', 'share_plat',
+                'share_session_id', 'share_tag', 'unique_k'
+            ])
+        },
+        {
+            matches: (host, path) => host === 'search.jd.com' && path === '/search',
+            remove: new Set(['pvid', 'themecolor', 'from', 'spmtag', 'spm'])
+        },
+        {
+            matches: (host, path) => path === '/item.htm' && (host === 'item.taobao.com' || host === 'detail.tmall.com'),
+            allowOnly: new Set([
+                'id', 'itemid', 'skuid', 'q', 'sort', 'page', 'pageno', 'pagesize', 'shopid',
+                'sellerid', 'category', 'tab'
+            ])
+        },
+        {
+            matches: (host, path) => host === 'item.jd.com' && /^\/\d+\.html$/.test(path),
+            allowOnly: new Set([
+                'sku', 'skuid', 'id', 'keyword', 'q', 'page', 'pageno', 'pagesize', 'sort',
+                'ev', 'stock', 'area', 'shopid', 'category', 'enc', 'wq', 'pid'
+            ])
+        }
+    ];
 
     // Signed download/API URLs can use arbitrary parameter names. Preserve them
     // before applying the allowlist. Match parameter names or delimited variants
@@ -86,29 +105,14 @@
         return /(^|\/)(login|signin|sign-in|logout|auth|oauth[^/]*|authorize[^/]*|checkout|payment|pay|captcha|verify|verification)(\/|$)/.test(path);
     }
 
-    function allowedParams(host, path) {
-        if (path === '/item.htm' && (host === 'item.taobao.com' || host === 'detail.tmall.com')) return taobaoItemAllowed;
-        if (host === 'item.jd.com' && /^\/\d+\.html$/.test(path)) return jdItemAllowed;
-        return null;
-    }
-
-    function siteTrackingParams(host, path) {
-        if (hostIs(host, 'bilibili.com')) return bilibiliTracking;
-        if (path !== '/search') return null;
-        if (host === 'search.jd.com') return jdSearchTracking;
-        if (hostIs(host, 'bing.com')) return bingSearchTracking;
-        if (hostIs(host, 'google.com') || /^www\.google\.[a-z]{2}(?:\.[a-z]{2})?$/.test(host)) return googleSearchTracking;
-        return null;
-    }
-
     function clean(input) {
         let url;
         try { url = new URL(input, page.location.href); } catch (_) { return input; }
         if (!url.search || (url.protocol !== 'http:' && url.protocol !== 'https:') || isProtectedUrl(url)) return url.href;
         const host = url.hostname.toLowerCase();
         const path = url.pathname.toLowerCase();
-        const allowed = allowedParams(host, path);
-        const siteTracking = siteTrackingParams(host, path);
+        const rule = siteParamRules.find((entry) => entry.matches(host, path));
+        const allowed = rule?.allowOnly;
         const fields = url.search.slice(1).split('&');
         const kept = [];
         for (const field of fields) {
@@ -118,8 +122,10 @@
             try { key = decodeURIComponent(rawKey.replace(/\+/g, ' ')).toLowerCase(); }
             catch (_) { kept.push(field); continue; }
             if (protectedQueryKey.test(key)) return url.href;
-            if (key.startsWith('utm_') || trackingParams.has(key) || siteTracking?.has(key)) continue;
-            if (allowed && !allowed.has(key)) continue;
+            if (!rule?.keep?.has(key)) {
+                if (key.startsWith('utm_') || trackingParams.has(key) || rule?.remove?.has(key)) continue;
+                if (allowed && !allowed.has(key)) continue;
+            }
             kept.push(field);
         }
         if (kept.length !== fields.length) url.search = kept.join('&');
