@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         URL Cleaner
 // @namespace    https://github.com/mariverse/userscripts
-// @version      1.0.7
+// @version      1.0.8
 // @license      MIT
 // @description  清理已知跟踪参数，在指定页面应用参数白名单，并在 X/Twitter 点击前解析 t.co。
 // @author       gpt-6.2-sol
@@ -47,8 +47,18 @@
     const MAX_CACHE = 64;
     const trackingParams = new Set([
         'gclid', 'dclid', 'gbraid', 'wbraid', 'msclkid', 'fbclid', 'ttclid', 'twclid',
-        'igshid', 'mc_cid', 'mc_eid', '_ga', '_gl'
+        'igshid', 'mc_cid', 'mc_eid', '_ga', '_gl', 'spm', 'utm_source', 'utm_medium',
+        'utm_campaign', 'utm_term', 'utm_content'
     ]);
+    const taobaoAuctionHosts = new Set([
+        'zc-paimai.taobao.com', 'sf.taobao.com', 'sf-item.taobao.com'
+    ]);
+    const sharedParamRules = [
+        {
+            matches: (host) => taobaoAuctionHosts.has(host),
+            remove: new Set(['pmid', 'pmtk', 'track_id', 'path'])
+        }
+    ];
     const siteParamRules = [
         {
             matches: (host, path) => path === '/search' && hostIs(host, 'bing.com'),
@@ -71,11 +81,11 @@
         },
         {
             matches: (host, path) => host === 'search.jd.com' && path === '/search',
-            remove: new Set(['pvid', 'themecolor', 'from', 'spmtag', 'spm'])
+            remove: new Set(['pvid', 'themecolor', 'from', 'spmtag'])
         },
         {
             matches: (host, path) => host === 's.taobao.com' && path === '/search',
-            remove: new Set(['clientpreloadid', 'initiative_id', 'preloadorigin', 'sourceid', 'spm', 'ssid'])
+            remove: new Set(['clientpreloadid', 'initiative_id', 'preloadorigin', 'sourceid', 'ssid'])
         },
         {
             matches: (host, path) => path === '/item.htm' && (host === 'item.taobao.com' || host === 'detail.tmall.com'),
@@ -115,6 +125,7 @@
         if (!url.search || (url.protocol !== 'http:' && url.protocol !== 'https:') || isProtectedUrl(url)) return url.href;
         const host = url.hostname.toLowerCase();
         const path = url.pathname.toLowerCase();
+        const sharedRules = sharedParamRules.filter((entry) => entry.matches(host));
         const rule = siteParamRules.find((entry) => entry.matches(host, path));
         const allowed = rule?.allowOnly;
         const fields = url.search.slice(1).split('&');
@@ -127,7 +138,8 @@
             catch (_) { kept.push(field); continue; }
             if (protectedQueryKey.test(key)) return url.href;
             if (!rule?.keep?.has(key)) {
-                if (key.startsWith('utm_') || trackingParams.has(key) || rule?.remove?.has(key)) continue;
+                if (key.startsWith('utm_') || trackingParams.has(key) || rule?.remove?.has(key) ||
+                    sharedRules.some((entry) => entry.remove.has(key))) continue;
                 if (allowed && !allowed.has(key)) continue;
             }
             kept.push(field);
