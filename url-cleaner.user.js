@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         URL Cleaner
 // @namespace    https://github.com/mariverse/userscripts
-// @version      1.0.8
+// @version      1.0.9
 // @license      MIT
-// @description  清理已知跟踪参数，在指定页面应用参数白名单，并在 X/Twitter 点击前解析 t.co。
-// @author       gpt-6.2-sol
+// @description  清理网址参数，并在 X/Twitter 点击前解析 t.co 短链。
+// @author       mariverse
 // @match        *://*/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
@@ -60,18 +60,21 @@
         }
     ];
     const siteParamRules = [
+        // rules to remove bing search utm parameters
         {
             matches: (host, path) => path === '/search' && hostIs(host, 'bing.com'),
             remove: new Set(['pc', 'form', 'sp', 'lq', 'pq', 'sc', 'qs', 'sk', 'cvid', 'ocid', 'ghsh', 'ghacc', 'ghpl'])
         },
+        // rules to remove google search utm parameters
         {
             matches: (host, path) => path === '/search' &&
-                (hostIs(host, 'google.com') || /^www\.google\.[a-z]{2}(?:\.[a-z]{2})?$/.test(host)),
+            (hostIs(host, 'google.com') || /^www\.google\.[a-z]{2}(?:\.[a-z]{2})?$/.test(host)),
             remove: new Set([
                 'sxsrf', 'ei', 'ved', 'usg', 'oq', 'gs_lcrp', 'gs_lcp', 'sca_esv', 'source',
                 'sourceid', 'iflsig', 'uact', 'ictx', 'opi', 'biw', 'bih'
             ])
         },
+        // rules to remove all *.bilibili.com/* site's utm parameters
         {
             matches: (host) => hostIs(host, 'bilibili.com'),
             remove: new Set([
@@ -79,14 +82,12 @@
                 'share_session_id', 'share_tag', 'unique_k'
             ])
         },
-        {
-            matches: (host, path) => host === 'search.jd.com' && path === '/search',
-            remove: new Set(['pvid', 'themecolor', 'from', 'spmtag'])
-        },
+        // rules to remove TB search utm parameters
         {
             matches: (host, path) => host === 's.taobao.com' && path === '/search',
             remove: new Set(['clientpreloadid', 'initiative_id', 'preloadorigin', 'sourceid', 'ssid'])
         },
+        // rules to allow only for TB item
         {
             matches: (host, path) => path === '/item.htm' && (host === 'item.taobao.com' || host === 'detail.tmall.com'),
             allowOnly: new Set([
@@ -94,11 +95,24 @@
                 'sellerid', 'category', 'tab'
             ])
         },
+        // rules to remove JD search utm parameters
+        {
+            matches: (host, path) => host === 'search.jd.com' && path === '/search',
+            remove: new Set(['pvid', 'themecolor', 'from', 'spmtag'])
+        },
+        // rules to allow only for JD item
         {
             matches: (host, path) => host === 'item.jd.com' && /^\/\d+\.html$/.test(path),
             allowOnly: new Set([
                 'sku', 'skuid', 'id', 'keyword', 'q', 'page', 'pageno', 'pagesize', 'sort',
                 'ev', 'stock', 'area', 'shopid', 'category', 'enc', 'wq', 'pid'
+            ])
+        },
+        // rules to remove all *.szlcsc.com/* site's utm parameters
+        {
+            matches: (host, path) => hostIs(host, 'szlcsc.com'),
+            remove: new Set([
+                'jlc_vid'
             ])
         }
     ];
@@ -359,8 +373,8 @@
     function request(url, method, timeoutMs = 2500) {
         return new Promise((resolve, reject) => {
             const fn = typeof GM_xmlhttpRequest === 'function'
-                ? GM_xmlhttpRequest
-                : (typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function' ? GM.xmlHttpRequest : null);
+            ? GM_xmlhttpRequest
+            : (typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function' ? GM.xmlHttpRequest : null);
             if (!fn) return reject(new Error('GM request API unavailable'));
             let settled = false;
             const finish = (cb) => (val) => {
@@ -463,7 +477,7 @@
 
     function showResult(text, copied) {
         const message = copied
-            ? `净化后的网址已复制到剪贴板：\n\n${text}`
+        ? `净化后的网址已复制到剪贴板：\n\n${text}`
             : `净化后的网址：\n\n${text}`;
         if (typeof page.alert === 'function') page.alert(message);
     }
